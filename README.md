@@ -2,6 +2,8 @@
 
 **Analyze overlap between ETFs to identify concentration risks and improve portfolio diversification.**
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/yonie)
+
 ![Screenshot of ETF Overlap Analysis](screenshot.png)
 
 ## 🚀 Quick Start
