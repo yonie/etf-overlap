@@ -2,8 +2,6 @@
 
 **Analyze overlap between ETFs to identify concentration risks and improve portfolio diversification.**
 
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/yonie)
-
 ![Screenshot of ETF Overlap Analysis](screenshot.png)
 
 ## 🚀 Quick Start
@@ -188,3 +186,11 @@ Contributions are welcome! Please follow these guidelines:
 ## 📖 License
 
 MIT License - See [LICENSE](LICENSE) for details.
+
+---
+
+## Support
+
+If you find this tool useful, consider buying me a coffee! Your support helps keep this project maintained and improving.
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/yonie)
