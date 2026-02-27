@@ -356,7 +356,11 @@ class ISINNormalizer:
             isin_clean = isin.strip().upper()
             cached = self._get_cached_mapping(isin_clean)
             if cached:
-                result[isin_clean] = cached['share_class_figi'] or isin_clean
+                # Store the mapping info for later company name matching
+                result[isin_clean] = {
+                    'share_class_figi': cached.get('share_class_figi'),
+                    'company_name': cached.get('company_name')
+                }
             else:
                 to_fetch.append(isin_clean)
         
@@ -370,13 +374,78 @@ class ISINNormalizer:
                 
                 for isin in batch:
                     if isin in mappings:
-                        result[isin] = mappings[isin]['share_class_figi']
+                        result[isin] = {
+                            'share_class_figi': mappings[isin].get('share_class_figi'),
+                            'company_name': mappings[isin].get('company_name')
+                        }
                     else:
                         # Cache miss - store original ISIN as fallback
                         self._cache_mapping(isin, None)
-                        result[isin] = isin
+                        result[isin] = {
+                            'share_class_figi': None,
+                            'company_name': None
+                        }
         
-        return result
+        # Second pass: apply company name matching to unify ADRs with underlying shares
+        # Build a list of (isin, figi, company_name) tuples
+        isin_info_list = []
+        for isin, info in result.items():
+            if isinstance(info, dict):
+                figi = info.get('share_class_figi')
+                company_name = info.get('company_name')
+                isin_info_list.append((isin, figi, company_name))
+        
+        # Group ISINs by company name matching
+        # Use the first figi found for each company group as the canonical ID
+        company_groups = []  # List of (canonical_figi, [isins])
+        
+        for isin, figi, company_name in isin_info_list:
+            if not figi or not company_name:
+                continue
+            
+            # Check if this ISIN matches an existing group
+            found_group = None
+            for canon_figi, group_isins, group_name in company_groups:
+                if companies_match(company_name, group_name):
+                    found_group = (canon_figi, group_isins, group_name)
+                    break
+            
+            if found_group:
+                # Add to existing group
+                found_group[1].append(isin)
+            else:
+                # Create new group with this ISIN's figi as canonical
+                company_groups.append((figi, [isin], company_name))
+        
+        # Store company canonical mappings
+        for canon_figi, group_isins, group_name in company_groups:
+            normalized = normalize_company_name(group_name)
+            if normalized:
+                self._store_company_canonical(normalized, canon_figi)
+        
+        # Now resolve each ISIN to its final canonical ID
+        final_result = {}
+        for isin, info in result.items():
+            if isinstance(info, dict):
+                figi = info.get('share_class_figi')
+                company_name = info.get('company_name')
+                
+                # Check if this ISIN is in a company group
+                canonical_id = figi
+                for canon_figi, group_isins, group_name in company_groups:
+                    if isin in group_isins:
+                        canonical_id = canon_figi
+                        break
+                
+                if canonical_id:
+                    final_result[isin] = canonical_id
+                else:
+                    final_result[isin] = isin
+            else:
+                # Legacy case: info was already a string
+                final_result[isin] = info if info else isin
+        
+        return final_result
     
     def _get_cached_mapping(self, isin: str) -> Optional[Dict]:
         """Get cached mapping if not expired."""

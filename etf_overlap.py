@@ -821,6 +821,21 @@ def main():
                 print(json.dumps(error_response, indent=2))
                 return 1
 
+            # Final normalization pass across all ETFs to ensure cross-ETF company name matching
+            if normalizer:
+                all_isins = set()
+                for etf in etfs:
+                    for holding in etf.holdings:
+                        if 'isin' in holding:
+                            all_isins.add(holding['isin'])
+                
+                if all_isins:
+                    canonical_map = normalizer.get_canonical_ids_batch(list(all_isins))
+                    for etf in etfs:
+                        for holding in etf.holdings:
+                            if 'isin' in holding and holding['isin'] in canonical_map:
+                                holding['canonical_id'] = canonical_map[holding['isin']]
+
             result = calculator.calculate_multi_overlap(etfs)
 
             output = {
