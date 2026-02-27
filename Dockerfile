@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip cache purge
 
 COPY etf_overlap.py .
+COPY isin_normalizer.py .
 COPY etf_web/ etf_web/
 
 RUN mkdir -p /app/data && \
