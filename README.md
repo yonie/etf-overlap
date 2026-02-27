@@ -4,7 +4,19 @@
 
 ![Screenshot of ETF Overlap Analysis](screenshot.png)
 
-## 🚀 Quick Start
+## Security Features
+
+This tool includes comprehensive security hardening for production deployment:
+
+- **Input Validation**: Strict ISIN format validation with regex pattern
+- **Rate Limiting**: Configurable limits to prevent abuse
+- **Security Headers**: CSP, HSTS, X-Frame-Options, X-Content-Type-Options
+- **Request Limits**: Max ISINs per request and request size limits
+- **Timeout Protection**: Subprocess and HTTP request timeouts
+- **Audit Logging**: Structured logging with timestamps
+- **Configurable Secrets**: Environment-based configuration
+
+## Quick Start
 
 ### Console Tool
 
@@ -23,136 +35,256 @@ python etf_overlap.py --multi IE00B4L5Y983,IE00B3RBWM25 --json
 
 # Expire cache and fetch fresh data
 python etf_overlap.py --multi IE00B4L5Y983,IE00B3RBWM25 --expire-cache
+
+# Enable verbose logging
+python etf_overlap.py --multi IE00B4L5Y983,IE00B3RBWM25 --verbose
 ```
 
 ### Web Interface
 
 ```bash
 cd etf_web
-pip install flask flask-limiter python-dotenv
+pip install -r requirements.txt
 
-# Copy .env.example to .env and set your password
+# Copy .env.example to .env and configure
 cp .env.example .env
-# Edit .env and set AUTH_PASSWORD
 
-python app.py  # Runs on http://localhost:3003
+# Run with Flask development server
+python app.py
+
+# Or run with Gunicorn for production
+gunicorn --bind 127.0.0.1:3003 --workers 2 app:app
 ```
 
-## 📊 Features
+## Configuration
 
-### Core Analysis
-- **Stock-Centric Analysis**: Identifies stocks appearing in multiple ETFs
-- **Concentration Risk Detection**: Highlights over-concentration in specific stocks
-- **Diversification Scoring**: Calculates 0-100 score based on overlap percentage
-- **Interactive Visualizations**: Charts showing overlap patterns
-- **JSON API**: Clean output for programmatic use
-- **Caching**: SQLite caching with 24-hour expiry
+### Environment Variables
 
-### Advanced Capabilities
-- **Multi-ETF Analysis**: Compare 2+ ETFs simultaneously
-- **Pairwise Comparisons**: Detailed overlap matrix between all ETF pairs
-- **Stock Overlap Analysis**: Shows stocks across multiple ETFs with total weights
-- **Error Handling**: Robust validation and error reporting
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FLASK_ENV` | Environment (development/production/testing) | development |
+| `SECRET_KEY` | Flask secret key for sessions | random |
+| `HOST` | Server bind address | 127.0.0.1 |
+| `PORT` | Server port | 3003 |
+| `HTTPS_ONLY` | Enable HTTPS-only headers | true |
+| `MAX_ISINS_PER_REQUEST` | Maximum ISINs per analysis request | 10 |
+| `MAX_REQUEST_SIZE_BYTES` | Maximum request body size | 10240 |
+| `SUBPROCESS_TIMEOUT_SECONDS` | Analysis timeout | 60 |
+| `RATELIMIT_DEFAULT` | Default rate limit | 200/day, 50/hour |
+| `RATELIMIT_ANALYZE` | Analysis endpoint rate limit | 10/minute |
+| `ETF_DATABASE_PATH` | Database file path | ./data/etf_cache.db |
+| `ETF_CACHE_EXPIRY_HOURS` | Cache validity period | 24 |
+| `LOG_LEVEL` | Logging level | INFO |
+| `LOG_FILE` | Log file path (optional) | - |
 
-### Web Interface Features
-- **Interactive UI**: User-friendly interface with real-time analysis
-- **Chart Visualizations**: Bar charts for concentration and weight distribution
-- **Authentication**: HTTP Basic Auth for security
-- **Rate Limiting**: 200 requests/day, 50/hour to prevent abuse
-- **Detailed Breakdown**: Tabular view of stock overlap
+## Production Deployment
 
-## 📋 Requirements
+### Security Checklist
 
-- Python 3.7+
-- Console: `requests`, `beautifulsoup4`
-- Web: `flask`, `flask-limiter`, `python-dotenv`
+- [ ] Set `FLASK_ENV=production`
+- [ ] Generate a strong `SECRET_KEY`
+- [ ] Set `HTTPS_ONLY=true` (requires reverse proxy with HTTPS)
+- [ ] Configure rate limiting for your use case
+- [ ] Set up log file rotation
+- [ ] Use a process manager (systemd, supervisord)
+- [ ] Configure firewall to restrict access
+- [ ] Set restrictive file permissions on database directory
 
-## 📁 Files
+### Gunicorn + Nginx Example
 
+**gunicorn.conf.py:**
+```python
+bind = "127.0.0.1:3003"
+workers = 2
+threads = 4
+timeout = 120
+accesslog = "/var/log/etf/access.log"
+errorlog = "/var/log/etf/error.log"
+loglevel = "info"
 ```
-.
-├── etf_overlap.py          # Main analysis tool
-├── etf_web/                # Web interface
-│   ├── app.py              # Flask server with auth & rate limiting
-│   ├── requirements.txt    # Web dependencies
-│   ├── .env.example        # Environment config template
-│   └── templates/index.html # Web UI with interactive charts
-├── README.md               # This file
-└── LICENSE                 # MIT License
-```
 
-## 🔧 Technical Details
+**Nginx config:**
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name your-domain.com;
 
-### Diversification Scoring
-The tool calculates a diversification score (0-100) based on total overlap percentage:
-- **80-100**: Excellent diversification, minimal overlap
-- **60-79**: Good diversification with some overlap
-- **40-59**: Moderate overlap, consider adjustments
-- **0-39**: High overlap, poor diversification
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
 
-### Caching Mechanism
-- Uses SQLite database (`etf_cache.db`)
-- Data cached for 24 hours to reduce API calls
-- Cache can be expired manually with `--expire-cache` flag
+    location / {
+        proxy_pass http://127.0.0.1:3003;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
 
-### Security Features
-- **Input Validation**: Strict ISIN format validation (regex: `^[A-Z]{2}[A-Z0-9]{9}[0-9]$`)
-- **Web Authentication**: HTTP Basic Auth required for web interface
-- **Rate Limiting**: Prevents abuse of the web API
-
-## 📖 API Documentation
-
-### Console JSON Output Structure
-```json
-{
-  "etfs": [
-    {
-      "isin": "IE00B4L5Y983",
-      "name": "ETF Name",
-      "holdings": [
-        {
-          "isin": "US0378331005",
-          "name": "Apple Inc",
-          "weight": 5.25
-        }
-      ]
+        # Rate limiting
+        limit_req zone=etf_limit burst=20 nodelay;
     }
-  ],
-  "summary": {
-    "total_etfs": 3,
-    "average_overlap_percentage": 12.45,
-    "total_unique_stocks": 150
-  },
-  "stock_overlap_analysis": [
-    {
-      "isin": "US0378331005",
-      "name": "Apple Inc",
-      "appears_in_etfs": 2,
-      "total_weight_across_all_etfs": 8.75,
-      "average_weight_per_etf": 4.38,
-      "etf_breakdown": [
-        {
-          "etf_isin": "IE00B4L5Y983",
-          "etf_name": "ETF 1",
-          "weight": 5.25
-        }
-      ]
-    }
-  ]
 }
+
+# Rate limiting zone
+limit_req_zone $binary_remote_addr zone=etf_limit:10m rate=10r/m;
 ```
 
-### Web API Endpoint
-```
-POST /api/analyze
-Content-Type: application/json
+### Systemd Service
 
+```ini
+[Unit]
+Description=ETF Overlap Analyzer
+After=network.target
+
+[Service]
+User=etf
+Group=etf
+WorkingDirectory=/opt/etf-overlap/etf_web
+Environment="PATH=/opt/etf-overlap/venv/bin"
+EnvironmentFile=/opt/etf-overlap/etf_web/.env
+ExecStart=/opt/etf-overlap/venv/bin/gunicorn -c gunicorn.conf.py app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### File Permissions
+
+```bash
+# Create dedicated user
+sudo useradd -r -s /bin/false etf
+
+# Set ownership
+sudo chown -R etf:etf /opt/etf-overlap
+
+# Restrict database directory
+chmod 750 /opt/etf-overlap/data
+chmod 640 /opt/etf-overlap/data/etf_cache.db
+
+# Protect environment file
+chmod 640 /opt/etf-overlap/etf_web/.env
+```
+
+## API Documentation
+
+### POST /api/analyze
+
+Analyze ETF overlap for multiple ETFs.
+
+**Request:**
+```json
 {
   "isins": ["IE00B4L5Y983", "IE00B3RBWM25"]
 }
 ```
 
-## ⚠️ Important Disclaimers
+**Response:**
+```json
+{
+  "data": {
+    "etfs": [...],
+    "summary": {
+      "total_etfs": 2,
+      "average_overlap_percentage": 15.32,
+      "total_unique_stocks": 842
+    },
+    "stock_overlap_analysis": [...]
+  }
+}
+```
+
+### GET /health
+
+Health check endpoint for load balancers.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-02-27T12:00:00.000000"
+}
+```
+
+## Security Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Internet                              │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Reverse Proxy (Nginx)                                       │
+│  - HTTPS Termination                                         │
+│  - Rate Limiting                                             │
+│  - Security Headers                                          │
+│  - Access Control (network-level)                            │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Gunicorn (WSGI Server)                                      │
+│  - Process Management                                        │
+│  - Request Handling                                          │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Flask Application                                           │
+│  - Security Headers Middleware                               │
+│  - Rate Limiting (Flask-Limiter)                            │
+│  - Input Validation                                          │
+│  - Request Size Limits                                       │
+│  - Audit Logging                                             │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  etf_overlap.py (Subprocess)                                │
+│  - ISIN Validation                                           │
+│  - Database Caching                                          │
+│  - External API Access (justetf.com)                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Dependencies
+
+### Core
+- Python 3.7+
+- requests==2.31.0
+- beautifulsoup4==4.12.2
+
+### Web Interface
+- Flask==2.3.2
+- Flask-Limiter==3.5.0
+- python-dotenv==1.0.0
+- gunicorn==21.2.0
+
+### Development
+- pytest==7.4.2
+- pytest-cov==4.1.0
+- flake8==6.1.0
+- bandit==1.7.5
+- safety==2.3.5
+
+## Running Security Audits
+
+```bash
+# Install dev dependencies
+pip install -r requirements-dev.txt
+
+# Run bandit security linter
+bandit -r etf_overlap.py etf_web/
+
+# Check for vulnerable dependencies
+safety check
+
+# Run flake8
+flake8 etf_overlap.py etf_web/
+```
+
+## Disclaimers
 
 **NO FINANCIAL ADVICE**: This tool provides data analysis only. It does not provide financial advice or recommendations. Consult a qualified financial advisor before making investment decisions.
 
@@ -160,30 +292,7 @@ Content-Type: application/json
 
 **DATA ACCURACY**: Results depend on data availability from justetf.com. Some ETFs may not have holdings information available.
 
-## 🔧 Security Notes
-
-- **Web Server**: Flask development server is not production-ready. Use with production WSGI server for deployment.
-- **Input Validation**: Basic validation is implemented but additional hardening may be needed for public deployment.
-- **Rate Limiting**: No rate limiting is implemented in console tool. Consider adding if exposing to public internet.
-- **Authentication**: Web interface requires HTTP Basic Auth. Set `AUTH_PASSWORD` in `.env` file.
-
-## 🛠️ Troubleshooting
-
-**Common Issues**:
-- **Invalid ISIN format**: Ensure ISINs are exactly 12 characters (2 letters + 9 alphanumeric + 1 digit)
-- **No holdings data**: Some ETFs don't provide holdings information on justetf.com
-- **Cache issues**: Use `--expire-cache` to force fresh data fetch
-- **Web auth errors**: Ensure `.env` file exists with valid `AUTH_PASSWORD`
-
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these guidelines:
-- Fork the repository and create a feature branch
-- Add comprehensive tests for new features
-- Update documentation for any changes
-- Submit pull requests with clear descriptions
-
-## 📖 License
+## License
 
 MIT License - See [LICENSE](LICENSE) for details.
 

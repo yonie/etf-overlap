@@ -1,0 +1,51 @@
+services:
+  etf-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: etf-analyzer
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:3003:3003"
+    environment:
+      - FLASK_ENV=production
+      - FLASK_DEBUG=false
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - HOST=0.0.0.0
+      - PORT=3003
+      - HTTPS_ONLY=false
+      - MAX_ISINS_PER_REQUEST=10
+      - MAX_REQUEST_SIZE_BYTES=10240
+      - SUBPROCESS_TIMEOUT_SECONDS=60
+      - RATELIMIT_STORAGE_URL=memory://
+      - RATELIMIT_DEFAULT=200 per day;50 per hour
+      - RATELIMIT_ANALYZE=10 per minute
+      - ETF_DATABASE_PATH=/app/data/etf_cache.db
+      - ETF_CACHE_EXPIRY_HOURS=24
+      - LOG_LEVEL=INFO
+    volumes:
+      - etf-data:/app/data
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3003/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - etf-internal
+
+volumes:
+  etf-data:
+    driver: local
+
+networks:
+  etf-internal:
+    driver: bridge
+    internal: false

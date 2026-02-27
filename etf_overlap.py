@@ -3,34 +3,55 @@
 ETF Overlap Analysis Tool
 Analyzes overlap between ETFs using justetf.com data
 
-SECURITY NOTES:
-- This tool scrapes data from justetf.com - users are responsible for compliance
-- No authentication/authorization is implemented
-- Input validation is basic - additional hardening needed for public use
-- SQLite cache uses local file storage - ensure proper file permissions
-- No rate limiting - consider adding if exposing to public internet
+SECURITY FEATURES:
+- Configurable database path with secure defaults
+- Input validation with strict ISIN format checking
+- Logging for audit and debugging
+- No secrets or sensitive data stored in code
+- Users responsible for compliance with justetf.com terms of service
+
+USAGE:
+    python etf_overlap.py --isin1 IE00B4L5Y983 --isin2 IE00B3RBWM25
+    python etf_overlap.py --multi IE00B4L5Y983,IE00B3RBWM25,IE00BK5BQT80
 """
 import sys
-
 import os
 import json
 import time
 import argparse
+import logging
+import stat
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+import re
+
 import requests
 from bs4 import BeautifulSoup
 import sqlite3
-from typing import List, Dict, Optional, Tuple
 
-# Constants
-DATABASE_FILE = 'etf_cache.db'
-CACHE_EXPIRY_HOURS = 24
+from isin_normalizer import ISINNormalizer, normalize_holdings
+
+DATABASE_FILE = os.getenv(
+    'ETF_DATABASE_PATH',
+    str(Path(__file__).parent / 'data' / 'etf_cache.db')
+)
+CACHE_EXPIRY_HOURS = int(os.getenv('ETF_CACHE_EXPIRY_HOURS', '24'))
 JUSTETF_URL = 'https://www.justetf.com/en/etf-profile.html?isin={}&tab=analyses'
+REQUEST_TIMEOUT = int(os.getenv('ETF_REQUEST_TIMEOUT', '30'))
+USER_AGENT = os.getenv(
+    'ETF_USER_AGENT',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+)
 
-# OPTIMIZATION: Pre-compile regex patterns for better performance
-import re
 WEIGHT_CLEAN_PATTERN = re.compile(r'[^\d.]')
 ISIN_PATTERN = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$')
+
+logging.basicConfig(
+    level=getattr(logging, os.getenv('ETF_LOG_LEVEL', 'INFO').upper()),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('etf_overlap')
 
 def validate_isin(isin: str) -> bool:
     """
@@ -62,25 +83,54 @@ class OverlapCalculator:
 
     @staticmethod
     def calculate_overlap(etf1: ETFData, etf2: ETFData) -> Dict:
-        """Calculate overlap between two ETFs"""
+        """Calculate overlap between two ETFs using canonical IDs"""
         common_holdings = []
         total_overlap = 0.0
 
-        # Create ISIN to holding map
-        etf1_map = {h['isin']: h for h in etf1.holdings}
-        etf2_map = {h['isin']: h for h in etf2.holdings}
+        # Create canonical ID to holding maps
+        # Group holdings by canonical_id to handle dual-listed stocks
+        etf1_map = {}
+        etf2_map = {}
+        
+        for h in etf1.holdings:
+            key = h.get('canonical_id') or h['isin']
+            if key not in etf1_map:
+                etf1_map[key] = []
+            etf1_map[key].append(h)
+        
+        for h in etf2.holdings:
+            key = h.get('canonical_id') or h['isin']
+            if key not in etf2_map:
+                etf2_map[key] = []
+            etf2_map[key].append(h)
 
-        # Find common holdings
-        for isin, holding1 in etf1_map.items():
-            if isin in etf2_map:
-                holding2 = etf2_map[isin]
-                min_weight = min(holding1['weight'], holding2['weight'])
+        # Find common holdings by canonical ID
+        for canonical_id, holdings1_list in etf1_map.items():
+            if canonical_id in etf2_map:
+                holdings2_list = etf2_map[canonical_id]
+                
+                # Get the first holding from each (they represent the same stock)
+                holding1 = holdings1_list[0]
+                holding2 = holdings2_list[0]
+                
+                # Sum weights if same stock appears multiple times in same ETF
+                weight1 = sum(h['weight'] for h in holdings1_list)
+                weight2 = sum(h['weight'] for h in holdings2_list)
+                
+                min_weight = min(weight1, weight2)
+                
+                # Collect all ISINs that map to this canonical ID
+                all_isins = [h['isin'] for h in holdings1_list + holdings2_list]
+                unique_isins = list(set(all_isins))
+                
                 common_holdings.append({
                     'isin': holding1['isin'],
+                    'canonical_id': canonical_id,
                     'name': holding1['name'],
                     'weight': min_weight,
-                    'etf1_weight': holding1['weight'],
-                    'etf2_weight': holding2['weight']
+                    'etf1_weight': weight1 / len(holdings1_list) if len(holdings1_list) > 1 else holding1['weight'],
+                    'etf2_weight': weight2 / len(holdings2_list) if len(holdings2_list) > 1 else holding2['weight'],
+                    'merged_isins': unique_isins if len(unique_isins) > 1 else None
                 })
                 total_overlap += min_weight
 
@@ -137,12 +187,28 @@ class OverlapCalculator:
 class DataCache:
     """Manages caching of ETF data"""
 
-    def __init__(self):
-        self.conn = sqlite3.connect(DATABASE_FILE)
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or DATABASE_FILE
+        self._ensure_secure_db_path()
         self._initialize_db()
+
+    def _ensure_secure_db_path(self):
+        """Ensure database directory exists with secure permissions"""
+        db_path = Path(self.db_path)
+        db_dir = db_path.parent
+        
+        db_dir.mkdir(parents=True, exist_ok=True)
+        
+        mode = os.stat(db_dir).st_mode
+        if mode & stat.S_IRWXO or mode & stat.S_IRWXG:
+            logger.warning(
+                f"Database directory {db_dir} has permissive permissions. "
+                f"Consider running: chmod 750 {db_dir}"
+            )
 
     def _initialize_db(self):
         """Initialize database tables"""
+        self.conn = sqlite3.connect(self.db_path)
         cursor = self.conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS etf_cache (
@@ -152,7 +218,13 @@ class DataCache:
                 fetched_at TIMESTAMP
             )
         ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fetched_at 
+            ON etf_cache(fetched_at)
+        ''')
         self.conn.commit()
+        logger.debug(f"Database initialized at {self.db_path}")
 
     def get_cached_data(self, isin: str) -> Optional[ETFData]:
         """Get cached ETF data if not expired"""
@@ -197,25 +269,36 @@ class DataCache:
 class DataFetcher:
     """Fetches ETF data from justetf.com"""
 
-    def __init__(self, cache: DataCache):
+    def __init__(self, cache: DataCache, normalizer: ISINNormalizer = None):
         self.cache = cache
+        self.normalizer = normalizer
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': USER_AGENT,
             'Accept-Language': 'en-US,en;q=0.9'
         })
 
     def fetch_etf_data(self, isin: str) -> ETFData:
         """Fetch ETF data with caching"""
-        # Try cache first
         cached = self.cache.get_cached_data(isin)
         if cached:
+            logger.debug(f"Cache hit for ISIN: {isin}")
             return cached
 
+        logger.info(f"Fetching data for ISIN: {isin}")
         url = JUSTETF_URL.format(isin)
-        response = self.session.get(url)
+        
+        try:
+            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+        except requests.Timeout:
+            logger.error(f"Timeout fetching {isin} after {REQUEST_TIMEOUT}s")
+            raise Exception(f"Request timeout for {isin}")
+        except requests.RequestException as e:
+            logger.error(f"Network error fetching {isin}: {e}")
+            raise Exception(f"Network error for {isin}: {e}")
 
         if response.status_code != 200:
+            logger.warning(f"HTTP {response.status_code} for {isin}")
             raise Exception(f"Failed to fetch {isin}: HTTP {response.status_code}")
 
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -274,6 +357,11 @@ class DataFetcher:
                     continue
 
         etf_data = ETFData(isin, name, holdings)
+        
+        # Normalize ISINs to canonical IDs if normalizer is available
+        if self.normalizer:
+            normalize_holdings(etf_data.holdings, self.normalizer)
+        
         self.cache.cache_data(etf_data)
         return etf_data
 
@@ -340,16 +428,21 @@ class ReportGenerator:
         # Calculate total stock overlap across all ETFs
         stock_appearances = {}
         stock_total_weights = {}
+        merged_isins_map = {}  # Track which ISINs were merged
 
         # Count how many ETFs each stock appears in and total weight
+        # Use canonical_id to properly group dual-listed stocks
         for etf in etfs:
             for holding in etf.holdings:
-                isin = holding['isin']
-                if isin not in stock_appearances:
-                    stock_appearances[isin] = 0
-                    stock_total_weights[isin] = 0
-                stock_appearances[isin] += 1
-                stock_total_weights[isin] += holding['weight']
+                canonical_id = holding.get('canonical_id') or holding['isin']
+                if canonical_id not in stock_appearances:
+                    stock_appearances[canonical_id] = 0
+                    stock_total_weights[canonical_id] = 0
+                    merged_isins_map[canonical_id] = []
+                stock_appearances[canonical_id] += 1
+                stock_total_weights[canonical_id] += holding['weight']
+                if holding['isin'] not in merged_isins_map[canonical_id]:
+                    merged_isins_map[canonical_id].append(holding['isin'])
 
         # Create sorted list of stocks by total weight (primary) and appearance count (secondary)
         stocks_by_appearance = sorted(
@@ -379,24 +472,30 @@ class ReportGenerator:
             })
 
         # Add stock overlap analysis (sorted by appearance)
-        for isin, appearance_count in stocks_by_appearance:
-            total_weight = stock_total_weights[isin]
+        for canonical_id, appearance_count in stocks_by_appearance:
+            total_weight = stock_total_weights[canonical_id]
             # Find the stock name from any ETF that has it
             stock_name = ""
+            original_isin = ""
             for etf in etfs:
                 for holding in etf.holdings:
-                    if holding['isin'] == isin:
+                    cid = holding.get('canonical_id') or holding['isin']
+                    if cid == canonical_id:
                         stock_name = holding['name']
+                        original_isin = holding['isin']
                         break
                 if stock_name:
                     break
 
+            merged_isins = merged_isins_map.get(canonical_id, [canonical_id])
             json_output["stock_overlap_analysis"].append({
-                "isin": isin,
+                "isin": original_isin,
+                "canonical_id": canonical_id,
                 "name": stock_name,
                 "appears_in_etfs": appearance_count,
                 "total_weight_across_all_etfs": total_weight,
-                "average_weight_per_etf": total_weight / appearance_count
+                "average_weight_per_etf": total_weight / appearance_count,
+                "merged_isins": merged_isins if len(merged_isins) > 1 else None
             })
 
         # Add pairwise comparisons
@@ -438,20 +537,34 @@ class ReportGenerator:
 
         for stock in stocks_by_appearance:
             if stock[1] > 1:  # Only show stocks in multiple ETFs
-                isin = stock[0]
-                total_weight = stock_total_weights[isin]
+                canonical_id = stock[0]
+                total_weight = stock_total_weights[canonical_id]
                 avg_weight = total_weight / stock[1]
                 stock_name = ""
+                original_isin = canonical_id
+                merged_isins = merged_isins_map.get(canonical_id, [canonical_id])
+                
                 for etf in etfs:
                     for holding in etf.holdings:
-                        if holding['isin'] == isin:
+                        cid = holding.get('canonical_id') or holding['isin']
+                        if cid == canonical_id:
                             stock_name = holding['name']
+                            original_isin = holding['isin']
                             break
                     if stock_name:
                         break
 
+                # Show merged ISINs if this stock has multiple listings
+                isin_display = original_isin[:13]
+                if len(merged_isins) > 1:
+                    isin_display = f"{original_isin[:10]}*"  # Asterisk indicates merged
+                
                 report.append("| {:<15} | {:<30} | {:<15} | {:<25.2f}% | {:<20.2f}% |".format(
-                    isin[:13], stock_name[:28], f"{stock[1]}/{len(etfs)}", total_weight, avg_weight))
+                    isin_display, stock_name[:28], f"{stock[1]}/{len(etfs)}", total_weight, avg_weight))
+                
+                # Add note about merged ISINs
+                if len(merged_isins) > 1:
+                    report.append(f"  └─ Merged ISINs: {', '.join(merged_isins[:3])}{'...' if len(merged_isins) > 3 else ''}")
 
         report.append('\n')
 
@@ -516,25 +629,27 @@ XX Look for ETFs with different sector/geographic focus."""
 
     @staticmethod
     def _get_stock_overlap_analysis(etfs: List[ETFData]) -> List[Dict]:
-        """Get stock overlap analysis for JSON output"""
+        """Get stock overlap analysis for JSON output using canonical IDs"""
         stock_appearances = {}
         stock_total_weights = {}
         stock_etf_details = {}
 
         # Count how many ETFs each stock appears in and total weight
+        # Use canonical_id to properly group dual-listed stocks
         for etf in etfs:
             for holding in etf.holdings:
-                isin = holding['isin']
-                if isin not in stock_appearances:
-                    stock_appearances[isin] = 0
-                    stock_total_weights[isin] = 0
-                    stock_etf_details[isin] = []
-                stock_appearances[isin] += 1
-                stock_total_weights[isin] += holding['weight']
-                stock_etf_details[isin].append({
+                canonical_id = holding.get('canonical_id') or holding['isin']
+                if canonical_id not in stock_appearances:
+                    stock_appearances[canonical_id] = 0
+                    stock_total_weights[canonical_id] = 0
+                    stock_etf_details[canonical_id] = []
+                stock_appearances[canonical_id] += 1
+                stock_total_weights[canonical_id] += holding['weight']
+                stock_etf_details[canonical_id].append({
                     "etf_isin": etf.isin,
                     "etf_name": etf.name,
-                    "weight": holding['weight']
+                    "weight": holding['weight'],
+                    "original_isin": holding['isin']
                 })
 
         # Create sorted list of stocks by total weight (primary) and appearance count (secondary)
@@ -545,25 +660,32 @@ XX Look for ETFs with different sector/geographic focus."""
 
         # Build analysis
         analysis = []
-        for isin, appearance_count in stocks_by_appearance:
-            total_weight = stock_total_weights[isin]
+        for canonical_id, appearance_count in stocks_by_appearance:
+            total_weight = stock_total_weights[canonical_id]
             # Find the stock name from any ETF that has it
             stock_name = ""
+            original_isin = ""
+            merged_isins = []
+            
             for etf in etfs:
                 for holding in etf.holdings:
-                    if holding['isin'] == isin:
-                        stock_name = holding['name']
-                        break
-                if stock_name:
-                    break
+                    cid = holding.get('canonical_id') or holding['isin']
+                    if cid == canonical_id:
+                        if not stock_name:
+                            stock_name = holding['name']
+                            original_isin = holding['isin']
+                        if holding['isin'] not in merged_isins:
+                            merged_isins.append(holding['isin'])
 
             analysis.append({
-                "isin": isin,
+                "isin": original_isin,
+                "canonical_id": canonical_id,
                 "name": stock_name,
                 "appears_in_etfs": appearance_count,
                 "total_weight_across_all_etfs": total_weight,
                 "average_weight_per_etf": total_weight / appearance_count,
-                "etf_breakdown": stock_etf_details[isin]
+                "etf_breakdown": stock_etf_details[canonical_id],
+                "merged_isins": merged_isins if len(merged_isins) > 1 else None
             })
 
         return analysis
@@ -576,27 +698,35 @@ def main():
     parser.add_argument('--multi', help='Multiple ETF ISIN codes (comma-separated)')
     parser.add_argument('--expire-cache', action='store_true', help='Expire cache and fetch fresh data')
     parser.add_argument('--json', action='store_true', help='Output JSON format for programmatic use')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
+    parser.add_argument('--no-normalize', action='store_true', help='Disable ISIN normalization (for comparison)')
 
     args = parser.parse_args()
 
-    # Initialize components
+    if args.verbose:
+        logging.getLogger('etf_overlap').setLevel(logging.DEBUG)
+        logging.getLogger('isin_normalizer').setLevel(logging.DEBUG)
+        logger.info("Verbose logging enabled")
+
+    logger.info(f"Starting ETF analysis - isin1={args.isin1}, isin2={args.isin2}, multi={args.multi}")
+
     cache = DataCache()
-    fetcher = DataFetcher(cache)
+    normalizer = None if args.no_normalize else ISINNormalizer()
+    fetcher = DataFetcher(cache, normalizer)
     calculator = OverlapCalculator()
     report_gen = ReportGenerator()
 
     try:
-        # Handle cache expiration if requested
         if args.expire_cache:
-            print("Expiring cache...")
+            logger.info("Expiring cache...")
             cursor = cache.conn.cursor()
             cursor.execute('DELETE FROM etf_cache')
             cache.conn.commit()
-            print("Cache expired.")
+            logger.info("Cache expired.")
 
         if args.isin1 and args.isin2:
-            # SECURITY: Validate ISINs
             if not validate_isin(args.isin1):
+                logger.warning(f"Invalid ISIN format: {args.isin1}")
                 error_response = {
                     "error": f"Invalid ISIN format: {args.isin1}. ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit).",
                     "status": "failed"
@@ -605,6 +735,7 @@ def main():
                 return 1
             
             if not validate_isin(args.isin2):
+                logger.warning(f"Invalid ISIN format: {args.isin2}")
                 error_response = {
                     "error": f"Invalid ISIN format: {args.isin2}. ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit).",
                     "status": "failed"
@@ -612,13 +743,12 @@ def main():
                 print(json.dumps(error_response, indent=2))
                 return 1
             
-            # Analyze two ETFs - act as a proper backend service
             try:
+                logger.info(f"Analyzing pair: {args.isin1} vs {args.isin2}")
                 etf1 = fetcher.fetch_etf_data(args.isin1.strip().upper())
                 etf2 = fetcher.fetch_etf_data(args.isin2.strip().upper())
                 result = calculator.calculate_overlap(etf1, etf2)
 
-                # Always output clean JSON - this is a backend service
                 json_result = {
                     "etf1": {
                         "isin": etf1.isin,
@@ -637,10 +767,11 @@ def main():
                     },
                     "common_holdings": result['common_holdings']
                 }
+                logger.info(f"Analysis complete: overlap={result['total_overlap_percentage']:.2f}%, score={result['diversification_score']:.1f}")
                 print(json.dumps(json_result, indent=2))
 
             except Exception as e:
-                # Return proper JSON error response
+                logger.error(f"Analysis failed: {e}")
                 error_response = {
                     "error": str(e),
                     "status": "failed"
@@ -649,10 +780,8 @@ def main():
                 return 1
 
         elif args.multi:
-            # Analyze multiple ETFs - act as a proper backend service
             raw_isins = [i.strip() for i in args.multi.split(',')]
             
-            # SECURITY: Validate all ISINs first
             invalid_isins = []
             isins = []
             for isin in raw_isins:
@@ -663,6 +792,7 @@ def main():
                     invalid_isins.append(isin)
             
             if invalid_isins:
+                logger.warning(f"Invalid ISINs: {invalid_isins}")
                 error_response = {
                     "error": f"Invalid ISIN format detected. ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit). Invalid: {', '.join(invalid_isins)}",
                     "status": "failed"
@@ -670,7 +800,7 @@ def main():
                 print(json.dumps(error_response, indent=2))
                 return 1
 
-            # Try to fetch all ETFs, but continue with valid ones if some fail
+            logger.info(f"Analyzing {len(isins)} ETFs: {', '.join(isins)}")
             etfs = []
             failed_isins = []
             for isin in isins:
@@ -678,10 +808,11 @@ def main():
                     etf = fetcher.fetch_etf_data(isin)
                     etfs.append(etf)
                 except Exception as e:
+                    logger.warning(f"Failed to fetch {isin}: {e}")
                     failed_isins.append((isin, str(e)))
 
             if len(etfs) < 2:
-                # Return proper JSON error response
+                logger.error(f"Not enough valid ETFs: {len(etfs)} valid, {len(failed_isins)} failed")
                 error_response = {
                     "error": "At least 2 valid ETFs are required for analysis",
                     "failed_isins": [{isin: error} for isin, error in failed_isins],
@@ -692,7 +823,6 @@ def main():
 
             result = calculator.calculate_multi_overlap(etfs)
 
-            # Always output clean JSON - this is a backend service
             output = {
                 "etfs": [{
                     "isin": etf.isin,
@@ -707,13 +837,14 @@ def main():
                 "stock_overlap_analysis": ReportGenerator._get_stock_overlap_analysis(result['etfs'])
             }
 
-            # Add warnings if any ETFs failed
             if failed_isins:
+                logger.warning(f"Some ETFs failed: {len(failed_isins)}")
                 output['warnings'] = {
                     "failed_isins": [{isin: error} for isin, error in failed_isins],
                     "message": f"{len(failed_isins)} ETF(s) could not be analyzed but analysis continued with {len(etfs)} valid ETF(s)"
                 }
 
+            logger.info(f"Multi-ETF analysis complete: {len(etfs)} ETFs, {result['average_overlap']:.2f}% avg overlap")
             print(json.dumps(output, indent=2))
 
         else:
@@ -722,6 +853,8 @@ def main():
 
     finally:
         cache.close()
+        if normalizer:
+            normalizer.close()
 
     return 0
 
