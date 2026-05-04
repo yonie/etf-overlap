@@ -13,6 +13,10 @@
         canvas { max-width: 100%; }
         .hidden { display: none; }
         .error { color: red; }
+        .warning-box { margin: 15px 0; padding: 12px 15px; background: #fff8e1; border-left: 4px solid #f0ad4e; border-radius: 3px; }
+        .warning-box h4 { margin: 0 0 8px 0; color: #8a6d3b; }
+        .warning-box ul { margin: 5px 0 0 20px; padding: 0; }
+        .warning-box li { margin-bottom: 6px; }
     </style>
 </head>
 <body>
@@ -33,6 +37,7 @@
 
         <div id="results" class="hidden">
             <h2>Analysis Results</h2>
+            <div id="warnings"></div>
             <div id="summary"></div>
 
             <div class="chart-container">
@@ -69,6 +74,33 @@
                     'IE00B4L5Y983\nIE00B3RBWM25\nIE00BK5BQT80';
             });
 
+            function isinsFromHash() {
+                const hash = window.location.hash.replace(/^#/, '');
+                if (!hash) return [];
+                return decodeURIComponent(hash)
+                    .split(/[,\s]+/)
+                    .map(s => s.trim().toUpperCase())
+                    .filter(s => s.length > 0);
+            }
+
+            // Populate textarea from URL hash on load and trigger analysis
+            const hashIsins = isinsFromHash();
+            if (hashIsins.length > 0) {
+                document.getElementById('isins').value = hashIsins.join('\n');
+                if (hashIsins.length >= 2 && hashIsins.every(validateISIN)) {
+                    setTimeout(() => document.getElementById('analyze-btn').click(), 0);
+                }
+            }
+
+            // Re-analyze when the hash changes (e.g. browser back/forward)
+            window.addEventListener('hashchange', function() {
+                const newIsins = isinsFromHash();
+                if (newIsins.length >= 2 && newIsins.every(validateISIN)) {
+                    document.getElementById('isins').value = newIsins.join('\n');
+                    document.getElementById('analyze-btn').click();
+                }
+            });
+
             // Analyze button
             document.getElementById('analyze-btn').addEventListener('click', async function() {
                 const rawIsins = document.getElementById('isins').value
@@ -99,6 +131,11 @@
                 }
 
                 const isins = validIsins;
+
+                const newHash = '#' + isins.join(',');
+                if (window.location.hash !== newHash) {
+                    history.replaceState(null, '', newHash);
+                }
 
                 showLoading(true);
                 hideError();
@@ -154,6 +191,25 @@
 
                 // Show results section
                 document.getElementById('results').classList.remove('hidden');
+
+                // Display warnings about ETFs that couldn't be analyzed
+                const warningsDiv = document.getElementById('warnings');
+                warningsDiv.innerHTML = '';
+                const failedIsins = data.warnings && data.warnings.failed_isins;
+                if (failedIsins && failedIsins.length > 0) {
+                    const items = failedIsins.map(entry => {
+                        const isin = Object.keys(entry)[0];
+                        const reason = entry[isin];
+                        return `<li><strong>${isin}</strong>: ${reason}</li>`;
+                    }).join('');
+                    warningsDiv.innerHTML = `
+                        <div class="warning-box">
+                            <h4>${failedIsins.length} ETF${failedIsins.length > 1 ? 's' : ''} could not be analyzed</h4>
+                            <p>The results below cover only the remaining ETFs.</p>
+                            <ul>${items}</ul>
+                        </div>
+                    `;
+                }
 
                 // Display summary
                 const summary = document.getElementById('summary');

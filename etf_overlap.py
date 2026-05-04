@@ -315,7 +315,7 @@ class DataFetcher:
         # Get holdings table - use the correct selector based on our analysis
         table = soup.find('table', {'data-testid': 'etf-holdings_top-holdings_table'})
         if not table:
-            raise Exception(f"ETF {isin} does not provide holdings information on justetf.com. This ETF may not have a holdings tab or the data is not available. Please remove this ISIN from your input.")
+            raise Exception(f"Holdings data for {isin} ({name}) is not available.")
 
         holdings = []
         tbody = table.find('tbody')
