@@ -25,7 +25,8 @@
         <div><p>This tool analyzes the overlap between ETFs by examining their stock holdings. To achieve this, data is used from <a href="https://justetf.com">justetf.com</a>. To prevent hammering, data is cached for 24 hours.</p></div>
         <div>
             <h3>Enter ETF ISINs (one per line):</h3>
-            <textarea id="isins" placeholder="IE00B4L5Y983&#10;IE00B3RBWM25&#10;IE00BK5BQT80"></textarea>
+            <p>Optionally add each ETF's share of your portfolio after the ISIN, e.g. <code>IE00B4L5Y983 70</code>.</p>
+            <textarea id="isins" placeholder="IE00B4L5Y983 70&#10;IE00B3RBWM25 20&#10;IE00BK5BQT80 10"></textarea>
             <div>
                 <button id="analyze-btn">Analyze</button>
                 <button id="example-btn">Load Examples</button>
@@ -74,65 +75,83 @@
                     'IE00B4L5Y983\nIE00B3RBWM25\nIE00BK5BQT80';
             });
 
-            function isinsFromHash() {
+            // One entry per line: an ISIN, optionally followed by its share of the
+            // portfolio in percent ("IE00B4L5Y983 70", "IE00B4L5Y983: 70%", "... 12,5")
+            function parseEntries(lines) {
+                const isins = [];
+                const shares = [];
+                const invalid = [];
+                lines.map(l => l.trim()).filter(l => l !== '').forEach(line => {
+                    const parts = line.split(/[\s:=;]+/).filter(p => p !== '');
+                    const isin = (parts[0] || '').toUpperCase();
+                    let share = null;
+                    if (parts.length > 2) { invalid.push(line); return; }
+                    if (parts.length === 2) {
+                        const text = parts[1].replace(/%$/, '').replace(',', '.');
+                        share = /^\d+(\.\d+)?$/.test(text) ? parseFloat(text) : NaN;
+                        if (!(share > 0)) { invalid.push(line); return; }
+                    }
+                    if (!validateISIN(isin)) { invalid.push(line); return; }
+                    isins.push(isin);
+                    shares.push(share);
+                });
+                const given = shares.filter(s => s !== null).length;
+                return {
+                    isins,
+                    weights: given > 0 ? shares : null,
+                    invalid,
+                    mixed: given > 0 && given < shares.length
+                };
+            }
+
+            function linesFromHash() {
                 const hash = window.location.hash.replace(/^#/, '');
                 if (!hash) return [];
                 return decodeURIComponent(hash)
                     .split(/[,\s]+/)
-                    .map(s => s.trim().toUpperCase())
+                    .map(s => s.trim().toUpperCase().replace(':', ' '))
                     .filter(s => s.length > 0);
             }
 
-            // Populate textarea from URL hash on load and trigger analysis
-            const hashIsins = isinsFromHash();
-            if (hashIsins.length > 0) {
-                document.getElementById('isins').value = hashIsins.join('\n');
-                if (hashIsins.length >= 2 && hashIsins.every(validateISIN)) {
+            function analyzeFromHash() {
+                const lines = linesFromHash();
+                if (lines.length === 0) return;
+                document.getElementById('isins').value = lines.join('\n');
+                const parsed = parseEntries(lines);
+                if (parsed.isins.length >= 2 && parsed.invalid.length === 0 && !parsed.mixed) {
                     setTimeout(() => document.getElementById('analyze-btn').click(), 0);
                 }
             }
 
+            // Populate textarea from URL hash on load and trigger analysis
+            analyzeFromHash();
+
             // Re-analyze when the hash changes (e.g. browser back/forward)
-            window.addEventListener('hashchange', function() {
-                const newIsins = isinsFromHash();
-                if (newIsins.length >= 2 && newIsins.every(validateISIN)) {
-                    document.getElementById('isins').value = newIsins.join('\n');
-                    document.getElementById('analyze-btn').click();
-                }
-            });
+            window.addEventListener('hashchange', analyzeFromHash);
 
             // Analyze button
             document.getElementById('analyze-btn').addEventListener('click', async function() {
-                const rawIsins = document.getElementById('isins').value
-                    .split('\n')
-                    .filter(isin => isin.trim() !== '');
+                const parsed = parseEntries(document.getElementById('isins').value.split('\n'));
 
-                if (rawIsins.length < 2) {
+                if (parsed.invalid.length > 0) {
+                    showError(`Invalid entry. Each line is an ISIN of exactly 12 characters (2 letters + 9 alphanumeric + 1 digit), optionally followed by a positive percentage.\nInvalid: ${parsed.invalid.join(', ')}`);
+                    return;
+                }
+
+                if (parsed.mixed) {
+                    showError('Give a percentage for every ETF, or for none of them.');
+                    return;
+                }
+
+                if (parsed.isins.length < 2) {
                     showError('Please enter at least 2 ETF ISINs');
                     return;
                 }
 
-                // Validate all ISINs before sending
-                const invalidIsins = [];
-                const validIsins = [];
-                
-                rawIsins.forEach(isin => {
-                    const cleaned = isin.trim().toUpperCase();
-                    if (validateISIN(cleaned)) {
-                        validIsins.push(cleaned);
-                    } else {
-                        invalidIsins.push(isin);
-                    }
-                });
+                const isins = parsed.isins;
+                const weights = parsed.weights;
 
-                if (invalidIsins.length > 0) {
-                    showError(`Invalid ISIN format detected. ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit).\nInvalid: ${invalidIsins.join(', ')}`);
-                    return;
-                }
-
-                const isins = validIsins;
-
-                const newHash = '#' + isins.join(',');
+                const newHash = '#' + isins.map((isin, i) => weights ? `${isin}:${weights[i]}` : isin).join(',');
                 if (window.location.hash !== newHash) {
                     history.replaceState(null, '', newHash);
                 }
@@ -142,10 +161,11 @@
                 hideResults();
 
                 try {
+                    const body = weights ? {isins, weights} : {isins};
                     const response = await fetch('/api/analyze', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({isins})
+                        body: JSON.stringify(body)
                     });
 
                     if (!response.ok) {
@@ -213,17 +233,23 @@
 
                 // Display summary
                 const summary = document.getElementById('summary');
+                const s = data.summary;
+                const weighted = s.portfolio_weights_given;
                 const etfList = data.etfs.map(etf =>
-                    `<li><strong>${etf.name}</strong> (${etf.isin})</li>`
+                    `<li>${weighted ? `${etf.portfolio_weight.toFixed(1)}% ` : ''}<strong>${etf.name}</strong> (${etf.isin})</li>`
                 ).join('');
-                
+
                 summary.innerHTML = `
-                    <p><strong>ETFs analyzed:</strong> ${data.summary.total_etfs}</p>
+                    <p><strong>ETFs analyzed:</strong> ${s.total_etfs}</p>
                     <ul style="margin: 10px 0; padding-left: 20px;">
                         ${etfList}
                     </ul>
-                    <p><strong>Total unique stocks observed:</strong> ${data.summary.total_unique_stocks}</p>
-                    <p><strong>Average overlap:</strong> ${data.summary.average_overlap_percentage.toFixed(2)}%</p>
+                    ${s.portfolio_weights_scaled ? '<p>Percentages scaled to add up to 100%.</p>' : ''}
+                    <p><strong>Total unique stocks observed:</strong> ${s.total_unique_stocks}</p>
+                    <p><strong>Average overlap:</strong> ${s.average_overlap_percentage.toFixed(2)}%</p>
+                    ${weighted ? `<p><strong>Average overlap weighted by portfolio share:</strong> ${s.weighted_average_overlap_percentage.toFixed(2)}%</p>` : ''}
+                    <p><strong>Portfolio in stocks held by more than one ETF:</strong> ${s.overlapping_exposure_percentage.toFixed(2)}%
+                        (the top holdings cover ${s.top_holdings_coverage_percentage.toFixed(2)}% of the portfolio)</p>
                 `;
 
                 // Destroy existing charts before creating new ones
@@ -268,8 +294,8 @@
                     data: {
                         labels: stocks.map(s => s.name || s.isin),
                         datasets: [{
-                            label: 'Total Weight Across All ETFs',
-                            data: stocks.map(s => s.total_weight_across_all_etfs),
+                            label: 'Share of portfolio (%)',
+                            data: stocks.map(s => s.portfolio_weight),
                             backgroundColor: 'rgba(75, 192, 192, 0.7)',
                             borderColor: 'rgba(75, 192, 192, 1)',
                             borderWidth: 1
@@ -285,14 +311,14 @@
             function createBreakdownTable(stocks, totalEtfs) {
                 const breakdown = document.getElementById('breakdown');
                 let html = '<table border="1" cellpadding="5" style="width: 100%; border-collapse: collapse;">';
-                html += '<tr><th>Stock</th><th>ISIN</th><th>ETFs</th><th>Total Weight</th><th>Details</th></tr>';
+                html += '<tr><th>Stock</th><th>ISIN</th><th>ETFs</th><th>Share of portfolio</th><th>Weight in each ETF</th></tr>';
 
                 stocks.forEach(stock => {
                     html += `<tr>
                         <td><strong>${stock.name}</strong></td>
                         <td style="font-size: 0.9em; color: #666;">${stock.isin}</td>
                         <td>${stock.appears_in_etfs}/${totalEtfs}</td>
-                        <td>${stock.total_weight_across_all_etfs.toFixed(2)}%</td>
+                        <td>${stock.portfolio_weight.toFixed(2)}%</td>
                         <td>
                             <ul style="margin: 0; padding-left: 20px;">
                                 ${stock.etf_breakdown.map(etf => `

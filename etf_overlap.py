@@ -13,8 +13,11 @@ SECURITY FEATURES:
 USAGE:
     python etf_overlap.py --isin1 IE00B4L5Y983 --isin2 IE00B3RBWM25
     python etf_overlap.py --multi IE00B4L5Y983,IE00B3RBWM25,IE00BK5BQT80
+    python etf_overlap.py --multi IE00B4L5Y983:70,IE00B3RBWM25:20,IE00BK5BQT80:10 --csv
 """
 import sys
+import csv
+import math
 import os
 import json
 import time
@@ -419,166 +422,99 @@ class ReportGenerator:
         return '\n'.join(report)
 
     @staticmethod
-    def generate_multi_report(result: Dict) -> str:
-        """Generate report for multiple ETFs"""
-        etfs = result['etfs']
-        matrix = result['overlap_matrix']
-        avg_overlap = result['average_overlap']
+    def generate_multi_table(output: Dict) -> str:
+        """Readable console report for a multi-ETF (portfolio) analysis"""
+        etfs = output['etfs']
+        summary = output['summary']
+        labels = [f"ETF{i}" for i in range(1, len(etfs) + 1)]
+        label_of = {etf['isin']: label for etf, label in zip(etfs, labels)}
 
-        # Calculate total stock overlap across all ETFs
-        stock_appearances = {}
-        stock_total_weights = {}
-        merged_isins_map = {}  # Track which ISINs were merged
+        lines = []
+        lines.append('PORTFOLIO')
+        lines.append(f"  {'':<5} {'Share':>7}  {'ISIN':<12}  Name")
+        for etf, label in zip(etfs, labels):
+            lines.append(f"  {label:<5} {etf['portfolio_weight']:>6.2f}%  {etf['isin']:<12}  {etf['name']}")
+        if not summary['portfolio_weights_given']:
+            lines.append('  (no shares given: every ETF counts equally)')
+        elif summary['portfolio_weights_scaled']:
+            lines.append('  (shares scaled to add up to 100%)')
+        lines.append('')
 
-        # Count how many ETFs each stock appears in and total weight
-        # Use canonical_id to properly group dual-listed stocks
-        for etf in etfs:
-            for holding in etf.holdings:
-                canonical_id = holding.get('canonical_id') or holding['isin']
-                if canonical_id not in stock_appearances:
-                    stock_appearances[canonical_id] = 0
-                    stock_total_weights[canonical_id] = 0
-                    merged_isins_map[canonical_id] = []
-                stock_appearances[canonical_id] += 1
-                stock_total_weights[canonical_id] += holding['weight']
-                if holding['isin'] not in merged_isins_map[canonical_id]:
-                    merged_isins_map[canonical_id].append(holding['isin'])
+        lines.append('OVERLAP BETWEEN ETFS')
+        for pair in output['pairwise_overlap']:
+            a = label_of[pair['etf1_isin']]
+            b = label_of[pair['etf2_isin']]
+            count = pair['common_holdings_count']
+            lines.append(f"  {a} x {b:<5} {pair['overlap_percentage']:>6.2f}%  "
+                         f"({count} {'stock' if count == 1 else 'stocks'} in common)")
+        lines.append(f"  Average overlap: {summary['average_overlap_percentage']:.2f}%")
+        if summary['portfolio_weights_given']:
+            lines.append(f"  Average overlap weighted by share: "
+                         f"{summary['weighted_average_overlap_percentage']:.2f}%")
+        lines.append('')
 
-        # Create sorted list of stocks by total weight (primary) and appearance count (secondary)
-        stocks_by_appearance = sorted(
-            stock_appearances.items(),
-            key=lambda x: (-stock_total_weights[x[0]], -x[1])
-        )
-
-        # Generate clean JSON output
-        json_output = {
-            "etfs": [],
-            "summary": {
-                "total_etfs": len(etfs),
-                "average_overlap_percentage": avg_overlap,
-                "total_unique_stocks": len(stock_appearances)
-            },
-            "stock_overlap_analysis": [],
-            "pairwise_comparisons": []
-        }
-
-        # Add ETF information
-        for etf in etfs:
-            json_output["etfs"].append({
-                "isin": etf.isin,
-                "name": etf.name,
-                "total_holdings": len(etf.holdings),
-                "holdings": etf.holdings
-            })
-
-        # Add stock overlap analysis (sorted by appearance)
-        for canonical_id, appearance_count in stocks_by_appearance:
-            total_weight = stock_total_weights[canonical_id]
-            # Find the stock name from any ETF that has it
-            stock_name = ""
-            original_isin = ""
+        lines.append('PORTFOLIO EXPOSURE PER STOCK (top holdings of each ETF)')
+        header = f"  {'Stock':<30} {'ISIN':<13} {'ETFs':>5} {'Portfolio':>9}"
+        header += ''.join(f" {label:>7}" for label in labels)
+        lines.append(header)
+        lines.append('  ' + '-' * (len(header) - 2))
+        for stock in output['stock_overlap_analysis']:
+            per_etf = ReportGenerator._weights_per_etf(stock)
+            isin = stock['isin'][:12] + ('*' if stock.get('merged_isins') else '')
+            row = (f"  {stock['name'][:30]:<30} {isin:<13} "
+                   f"{stock['appears_in_etfs']:>2}/{len(etfs):<2} {stock['portfolio_weight']:>8.2f}%")
             for etf in etfs:
-                for holding in etf.holdings:
-                    cid = holding.get('canonical_id') or holding['isin']
-                    if cid == canonical_id:
-                        stock_name = holding['name']
-                        original_isin = holding['isin']
-                        break
-                if stock_name:
-                    break
+                weight = per_etf.get(etf['isin'])
+                row += f" {weight:>6.2f}%" if weight is not None else f" {'-':>7}"
+            lines.append(row)
+        lines.append('')
+        lines.append(f"  The top holdings cover {summary['top_holdings_coverage_percentage']:.2f}% of the portfolio; "
+                     f"{summary['overlapping_exposure_percentage']:.2f}% is in stocks held by more than one ETF.")
+        if any(s.get('merged_isins') for s in output['stock_overlap_analysis']):
+            lines.append('  * the same company listed under more than one ISIN, counted as one')
 
-            merged_isins = merged_isins_map.get(canonical_id, [canonical_id])
-            json_output["stock_overlap_analysis"].append({
-                "isin": original_isin,
-                "canonical_id": canonical_id,
-                "name": stock_name,
-                "appears_in_etfs": appearance_count,
-                "total_weight_across_all_etfs": total_weight,
-                "average_weight_per_etf": total_weight / appearance_count,
-                "merged_isins": merged_isins if len(merged_isins) > 1 else None
-            })
+        warnings = output.get('warnings')
+        if warnings:
+            lines.append('')
+            lines.append(f"WARNING: {warnings['message']}")
+            for entry in warnings['failed_isins']:
+                for isin, error in entry.items():
+                    lines.append(f"  {isin}: {error}")
 
-        # Add pairwise comparisons
-        for i, etf1 in enumerate(etfs):
-            for j, etf2 in enumerate(etfs):
-                if i < j:
-                    overlap = matrix[etf1.isin][etf2.isin]
-                    json_output["pairwise_comparisons"].append({
-                        "etf1_isin": etf1.isin,
-                        "etf2_isin": etf2.isin,
-                        "overlap_percentage": overlap['overlap_percentage'],
-                        "common_holdings_count": len(overlap['common_holdings']),
-                        "common_holdings": overlap['common_holdings']
-                    })
+        return '\n'.join(lines)
 
-        # Generate clean text output for console
-        report = []
-        report.append('=' * 80)
-        report.append('MULTI-ETF OVERLAP ANALYSIS REPORT'.center(80))
-        report.append('=' * 80 + '\n')
+    @staticmethod
+    def _weights_per_etf(stock: Dict) -> Dict[str, float]:
+        """A stock's weight in each ETF, share classes of one company added up"""
+        per_etf = {}
+        for d in stock['etf_breakdown']:
+            per_etf[d['etf_isin']] = per_etf.get(d['etf_isin'], 0.0) + d['weight']
+        return per_etf
 
-        report.append('ETFS IN ANALYSIS'.center(80))
-        report.append('-' * 80)
-        for i, etf in enumerate(etfs, 1):
-            report.append(f"{i}. {etf.name} ({etf.isin})")
-            report.append(f"   Holdings: {len(etf.holdings)}\n")
-        report.append('\n')
+    @staticmethod
+    def write_multi_csv(output: Dict, stream) -> None:
+        """One row per stock: portfolio exposure plus its weight in every ETF"""
+        etfs = output['etfs']
+        writer = csv.writer(stream, lineterminator='\n')
+        writer.writerow(['isin', 'name', 'etf_count', 'portfolio_weight']
+                        + [f"weight_in_{etf['isin']}" for etf in etfs])
+        for stock in output['stock_overlap_analysis']:
+            per_etf = ReportGenerator._weights_per_etf(stock)
+            writer.writerow([stock['isin'], stock['name'], stock['appears_in_etfs'],
+                             f"{stock['portfolio_weight']:.4f}"]
+                            + [f"{per_etf[etf['isin']]:.4f}" if etf['isin'] in per_etf else ''
+                               for etf in etfs])
 
-        report.append('STOCK OVERLAP ANALYSIS (ACROSS ALL ETFs)'.center(80))
-        report.append('-' * 80)
-        report.append(f"Total Unique Stocks: {len(stock_appearances)}")
-        report.append(f"Average Overlap: {avg_overlap:.2f}%\n")
-
-        # Show stocks that appear in multiple ETFs (concentration risk)
-        report.append("STOCKS WITH HIGHEST CONCENTRATION RISK:")
-        report.append("| {:<15} | {:<30} | {:<15} | {:<25} | {:<20} |".format(
-            "ISIN", "Name", "ETF Count", "Total Weight", "Avg Weight/ETF"))
-        report.append("|" + "-" * 15 + "|" + "-" * 30 + "|" + "-" * 15 + "|" + "-" * 25 + "|" + "-" * 20 + "|")
-
-        for stock in stocks_by_appearance:
-            if stock[1] > 1:  # Only show stocks in multiple ETFs
-                canonical_id = stock[0]
-                total_weight = stock_total_weights[canonical_id]
-                avg_weight = total_weight / stock[1]
-                stock_name = ""
-                original_isin = canonical_id
-                merged_isins = merged_isins_map.get(canonical_id, [canonical_id])
-                
-                for etf in etfs:
-                    for holding in etf.holdings:
-                        cid = holding.get('canonical_id') or holding['isin']
-                        if cid == canonical_id:
-                            stock_name = holding['name']
-                            original_isin = holding['isin']
-                            break
-                    if stock_name:
-                        break
-
-                # Show merged ISINs if this stock has multiple listings
-                isin_display = original_isin[:13]
-                if len(merged_isins) > 1:
-                    isin_display = f"{original_isin[:10]}*"  # Asterisk indicates merged
-                
-                report.append("| {:<15} | {:<30} | {:<15} | {:<25.2f}% | {:<20.2f}% |".format(
-                    isin_display, stock_name[:28], f"{stock[1]}/{len(etfs)}", total_weight, avg_weight))
-                
-                # Add note about merged ISINs
-                if len(merged_isins) > 1:
-                    report.append(f"  └─ Merged ISINs: {', '.join(merged_isins[:3])}{'...' if len(merged_isins) > 3 else ''}")
-
-        report.append('\n')
-
-        # Add JSON output section
-        report.append('JSON OUTPUT (FOR PROGRAMMATIC USE)'.center(80))
-        report.append('-' * 80)
-        report.append(json.dumps(json_output, indent=2))
-        report.append('\n')
-
-        report.append('=' * 80)
-        report.append('End of Report'.center(80))
-        report.append('=' * 80)
-
-        return '\n'.join(report)
+    @staticmethod
+    def write_pair_csv(json_result: Dict, stream) -> None:
+        """One row per stock the two ETFs have in common"""
+        writer = csv.writer(stream, lineterminator='\n')
+        writer.writerow(['isin', 'name', 'overlap_weight',
+                         f"weight_in_{json_result['etf1']['isin']}",
+                         f"weight_in_{json_result['etf2']['isin']}"])
+        for h in sorted(json_result['common_holdings'], key=lambda x: x['weight'], reverse=True):
+            writer.writerow([h['isin'], h['name'], f"{h['weight']:.4f}",
+                             f"{h['etf1_weight']:.4f}", f"{h['etf2_weight']:.4f}"])
 
     @staticmethod
     def _format_etf_info(etf: ETFData, label: str) -> str:
@@ -628,10 +564,17 @@ XX Strongly consider holding only one of these ETFs.
 XX Look for ETFs with different sector/geographic focus."""
 
     @staticmethod
-    def _get_stock_overlap_analysis(etfs: List[ETFData]) -> List[Dict]:
-        """Get stock overlap analysis for JSON output using canonical IDs"""
+    def _get_stock_overlap_analysis(etfs: List[ETFData], portfolio_weights: Dict[str, float] = None) -> List[Dict]:
+        """Get stock overlap analysis for JSON output using canonical IDs.
+
+        portfolio_weights maps ETF ISIN to its share of the portfolio in percent
+        (summing to 100); without it every ETF counts equally.
+        """
+        if portfolio_weights is None:
+            portfolio_weights = {etf.isin: 100.0 / len(etfs) for etf in etfs}
         stock_appearances = {}
         stock_total_weights = {}
+        stock_portfolio_weights = {}
         stock_etf_details = {}
 
         # Count how many ETFs each stock appears in and total weight
@@ -640,22 +583,31 @@ XX Look for ETFs with different sector/geographic focus."""
             for holding in etf.holdings:
                 canonical_id = holding.get('canonical_id') or holding['isin']
                 if canonical_id not in stock_appearances:
-                    stock_appearances[canonical_id] = 0
+                    # A set of ETF ISINs: two share classes of one company in the
+                    # same ETF still count as one ETF
+                    stock_appearances[canonical_id] = set()
                     stock_total_weights[canonical_id] = 0
+                    stock_portfolio_weights[canonical_id] = 0
                     stock_etf_details[canonical_id] = []
-                stock_appearances[canonical_id] += 1
+                contribution = portfolio_weights[etf.isin] / 100.0 * holding['weight']
+                stock_appearances[canonical_id].add(etf.isin)
                 stock_total_weights[canonical_id] += holding['weight']
+                stock_portfolio_weights[canonical_id] += contribution
                 stock_etf_details[canonical_id].append({
                     "etf_isin": etf.isin,
                     "etf_name": etf.name,
                     "weight": holding['weight'],
+                    "portfolio_contribution": contribution,
                     "original_isin": holding['isin']
                 })
 
-        # Create sorted list of stocks by total weight (primary) and appearance count (secondary)
+        stock_appearances = {cid: len(etf_isins) for cid, etf_isins in stock_appearances.items()}
+
+        # Sort by share of the portfolio (primary) and appearance count (secondary).
+        # With equal weights this is the same order as total weight across ETFs.
         stocks_by_appearance = sorted(
             stock_appearances.items(),
-            key=lambda x: (-stock_total_weights[x[0]], -x[1])
+            key=lambda x: (-stock_portfolio_weights[x[0]], -x[1])
         )
 
         # Build analysis
@@ -684,31 +636,92 @@ XX Look for ETFs with different sector/geographic focus."""
                 "appears_in_etfs": appearance_count,
                 "total_weight_across_all_etfs": total_weight,
                 "average_weight_per_etf": total_weight / appearance_count,
+                "portfolio_weight": stock_portfolio_weights[canonical_id],
                 "etf_breakdown": stock_etf_details[canonical_id],
                 "merged_isins": merged_isins if len(merged_isins) > 1 else None
             })
 
         return analysis
 
+def parse_portfolio(spec: str) -> Tuple[List[str], List[Optional[float]], List[str]]:
+    """Split 'ISIN[:share],ISIN[:share],...' into ISINs, shares (None when not given)
+    and the entries that could not be read"""
+    isins, shares, invalid = [], [], []
+    for entry in spec.split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        isin, sep, share_text = entry.partition(':')
+        isin = isin.strip().upper()
+        share = None
+        if sep:
+            try:
+                share = float(share_text.strip().rstrip('%'))
+            except ValueError:
+                share = -1.0
+            if not (math.isfinite(share) and share > 0):
+                invalid.append(entry)
+                continue
+        if not validate_isin(isin):
+            invalid.append(entry)
+            continue
+        isins.append(isin)
+        shares.append(share)
+    return isins, shares, invalid
+
+
+def emit_error(payload: Dict, fmt: str) -> int:
+    """Report a failure: JSON on stdout for programmatic use, plain text on stderr otherwise"""
+    if fmt == 'json':
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Error: {payload['error']}", file=sys.stderr)
+        for entry in payload.get('failed_isins', []):
+            for isin, error in entry.items():
+                print(f"  {isin}: {error}", file=sys.stderr)
+    return 1
+
+
+ISIN_FORMAT_HINT = "ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit)."
+
+
 def main():
     """Main application entry point"""
-    parser = argparse.ArgumentParser(description='ETF Overlap Analysis Tool')
+    parser = argparse.ArgumentParser(
+        description='ETF Overlap Analysis Tool',
+        epilog='Portfolio shares: --multi IE00B4L5Y983:70,IE00B3RBWM25:15,IE00BK5BQT80:15 '
+               '(percentages; scaled to 100 if they do not add up to it)')
     parser.add_argument('--isin1', help='First ETF ISIN code')
     parser.add_argument('--isin2', help='Second ETF ISIN code')
-    parser.add_argument('--multi', help='Multiple ETF ISIN codes (comma-separated)')
+    parser.add_argument('--multi', help='Multiple ETF ISIN codes (comma-separated), each optionally '
+                                        'followed by :share for its percentage of the portfolio')
     parser.add_argument('--expire-cache', action='store_true', help='Expire cache and fetch fresh data')
-    parser.add_argument('--json', action='store_true', help='Output JSON format for programmatic use')
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument('--format', choices=['table', 'csv', 'json'], default='table',
+                              help='Output format (default: table)')
+    output_group.add_argument('--json', dest='format', action='store_const', const='json',
+                              help='Same as --format json')
+    output_group.add_argument('--csv', dest='format', action='store_const', const='csv',
+                              help='Same as --format csv')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
     parser.add_argument('--no-normalize', action='store_true', help='Disable ISIN normalization (for comparison)')
 
     args = parser.parse_args()
+    fmt = args.format
 
     if args.verbose:
         logging.getLogger('etf_overlap').setLevel(logging.DEBUG)
         logging.getLogger('isin_normalizer').setLevel(logging.DEBUG)
         logger.info("Verbose logging enabled")
+    elif fmt != 'json' and 'ETF_LOG_LEVEL' not in os.environ:
+        # Keep the console readable: only warnings and errors next to a table or CSV
+        logging.getLogger().setLevel(logging.WARNING)
 
     logger.info(f"Starting ETF analysis - isin1={args.isin1}, isin2={args.isin2}, multi={args.multi}")
+
+    if not ((args.isin1 and args.isin2) or args.multi):
+        parser.print_help()
+        return 1
 
     cache = DataCache()
     normalizer = None if args.no_normalize else ISINNormalizer()
@@ -725,80 +738,76 @@ def main():
             logger.info("Cache expired.")
 
         if args.isin1 and args.isin2:
-            if not validate_isin(args.isin1):
-                logger.warning(f"Invalid ISIN format: {args.isin1}")
-                error_response = {
-                    "error": f"Invalid ISIN format: {args.isin1}. ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit).",
-                    "status": "failed"
-                }
-                print(json.dumps(error_response, indent=2))
-                return 1
-            
-            if not validate_isin(args.isin2):
-                logger.warning(f"Invalid ISIN format: {args.isin2}")
-                error_response = {
-                    "error": f"Invalid ISIN format: {args.isin2}. ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit).",
-                    "status": "failed"
-                }
-                print(json.dumps(error_response, indent=2))
-                return 1
-            
+            for isin in (args.isin1, args.isin2):
+                if not validate_isin(isin):
+                    logger.warning(f"Invalid ISIN format: {isin}")
+                    return emit_error({"error": f"Invalid ISIN format: {isin}. {ISIN_FORMAT_HINT}",
+                                       "status": "failed"}, fmt)
+
             try:
                 logger.info(f"Analyzing pair: {args.isin1} vs {args.isin2}")
                 etf1 = fetcher.fetch_etf_data(args.isin1.strip().upper())
                 etf2 = fetcher.fetch_etf_data(args.isin2.strip().upper())
                 result = calculator.calculate_overlap(etf1, etf2)
-
-                json_result = {
-                    "etf1": {
-                        "isin": etf1.isin,
-                        "name": etf1.name,
-                        "holdings": etf1.holdings
-                    },
-                    "etf2": {
-                        "isin": etf2.isin,
-                        "name": etf2.name,
-                        "holdings": etf2.holdings
-                    },
-                    "summary": {
-                        "total_overlap_percentage": result['total_overlap_percentage'],
-                        "diversification_score": result['diversification_score'],
-                        "common_holdings_count": len(result['common_holdings'])
-                    },
-                    "common_holdings": result['common_holdings']
-                }
-                logger.info(f"Analysis complete: overlap={result['total_overlap_percentage']:.2f}%, score={result['diversification_score']:.1f}")
-                print(json.dumps(json_result, indent=2))
-
             except Exception as e:
                 logger.error(f"Analysis failed: {e}")
-                error_response = {
-                    "error": str(e),
-                    "status": "failed"
-                }
-                print(json.dumps(error_response, indent=2))
-                return 1
+                return emit_error({"error": str(e), "status": "failed"}, fmt)
 
-        elif args.multi:
-            raw_isins = [i.strip() for i in args.multi.split(',')]
-            
-            invalid_isins = []
-            isins = []
-            for isin in raw_isins:
-                isin_cleaned = isin.strip().upper()
-                if validate_isin(isin_cleaned):
-                    isins.append(isin_cleaned)
-                else:
-                    invalid_isins.append(isin)
-            
-            if invalid_isins:
-                logger.warning(f"Invalid ISINs: {invalid_isins}")
-                error_response = {
-                    "error": f"Invalid ISIN format detected. ISINs must be exactly 12 characters (2 letters + 9 alphanumeric + 1 digit). Invalid: {', '.join(invalid_isins)}",
+            json_result = {
+                "etf1": {
+                    "isin": etf1.isin,
+                    "name": etf1.name,
+                    "holdings": etf1.holdings
+                },
+                "etf2": {
+                    "isin": etf2.isin,
+                    "name": etf2.name,
+                    "holdings": etf2.holdings
+                },
+                "summary": {
+                    "total_overlap_percentage": result['total_overlap_percentage'],
+                    "diversification_score": result['diversification_score'],
+                    "common_holdings_count": len(result['common_holdings'])
+                },
+                "common_holdings": result['common_holdings']
+            }
+            logger.info(f"Analysis complete: overlap={result['total_overlap_percentage']:.2f}%, score={result['diversification_score']:.1f}")
+            if fmt == 'json':
+                print(json.dumps(json_result, indent=2))
+            elif fmt == 'csv':
+                report_gen.write_pair_csv(json_result, sys.stdout)
+            else:
+                print(report_gen.generate_text_report(result))
+
+        else:
+            isins, shares, invalid_entries = parse_portfolio(args.multi)
+
+            if invalid_entries:
+                logger.warning(f"Invalid entries: {invalid_entries}")
+                return emit_error({
+                    "error": f"Invalid ISIN or share. {ISIN_FORMAT_HINT} A share is a positive "
+                             f"percentage after a colon, e.g. IE00B4L5Y983:70. "
+                             f"Invalid: {', '.join(invalid_entries)}",
                     "status": "failed"
-                }
-                print(json.dumps(error_response, indent=2))
-                return 1
+                }, fmt)
+
+            given = [s for s in shares if s is not None]
+            if 0 < len(given) < len(shares):
+                return emit_error({
+                    "error": "Give a portfolio share for every ETF, or for none of them.",
+                    "status": "failed"
+                }, fmt)
+            weights_given = bool(given)
+
+            # Same ETF listed twice: analyse it once, with the shares added up
+            raw_weights = {}
+            for isin, share in zip(isins, shares):
+                raw_weights[isin] = raw_weights.get(isin, 0.0) + (share if share is not None else 1.0)
+            isins = list(raw_weights)
+
+            if len(isins) < 2:
+                return emit_error({"error": "At least 2 different ETFs are required for analysis",
+                                   "status": "failed"}, fmt)
 
             logger.info(f"Analyzing {len(isins)} ETFs: {', '.join(isins)}")
             etfs = []
@@ -813,13 +822,12 @@ def main():
 
             if len(etfs) < 2:
                 logger.error(f"Not enough valid ETFs: {len(etfs)} valid, {len(failed_isins)} failed")
-                error_response = {
+                payload = {
                     "error": "At least 2 valid ETFs are required for analysis",
                     "failed_isins": [{isin: error} for isin, error in failed_isins],
                     "valid_isins_count": len(etfs)
                 }
-                print(json.dumps(error_response, indent=2))
-                return 1
+                return emit_error(payload, fmt)
 
             # Final normalization pass across all ETFs to ensure cross-ETF company name matching
             if normalizer:
@@ -828,7 +836,7 @@ def main():
                     for holding in etf.holdings:
                         if 'isin' in holding:
                             all_isins.add(holding['isin'])
-                
+
                 if all_isins:
                     canonical_map = normalizer.get_canonical_ids_batch(list(all_isins))
                     for etf in etfs:
@@ -838,18 +846,50 @@ def main():
 
             result = calculator.calculate_multi_overlap(etfs)
 
+            # Shares of the ETFs that could be analysed, scaled to add up to 100%
+            loaded_total = sum(raw_weights[etf.isin] for etf in result['etfs'])
+            portfolio_weights = {etf.isin: raw_weights[etf.isin] / loaded_total * 100.0
+                                 for etf in result['etfs']}
+            weights_scaled = weights_given and (failed_isins or abs(sum(given) - 100.0) > 0.01)
+
+            pairwise = []
+            weighted_sum = 0.0
+            weight_pairs = 0.0
+            for i, etf1 in enumerate(result['etfs']):
+                for etf2 in result['etfs'][i + 1:]:
+                    pair = result['overlap_matrix'][etf1.isin][etf2.isin]
+                    pairwise.append({
+                        "etf1_isin": etf1.isin,
+                        "etf2_isin": etf2.isin,
+                        "overlap_percentage": pair['overlap_percentage'],
+                        "common_holdings_count": len(pair['common_holdings'])
+                    })
+                    w = portfolio_weights[etf1.isin] * portfolio_weights[etf2.isin]
+                    weighted_sum += w * pair['overlap_percentage']
+                    weight_pairs += w
+
+            stock_analysis = ReportGenerator._get_stock_overlap_analysis(result['etfs'], portfolio_weights)
+
             output = {
                 "etfs": [{
                     "isin": etf.isin,
                     "name": etf.name,
+                    "portfolio_weight": portfolio_weights[etf.isin],
                     "holdings": etf.holdings
                 } for etf in result['etfs']],
                 "summary": {
                     "total_etfs": len(result['etfs']),
                     "average_overlap_percentage": result['average_overlap'],
-                    "total_unique_stocks": len(set(stock['isin'] for etf in result['etfs'] for stock in etf.holdings))
+                    "weighted_average_overlap_percentage": weighted_sum / weight_pairs if weight_pairs else 0.0,
+                    "total_unique_stocks": len(set(stock['isin'] for etf in result['etfs'] for stock in etf.holdings)),
+                    "portfolio_weights_given": weights_given,
+                    "portfolio_weights_scaled": bool(weights_scaled),
+                    "top_holdings_coverage_percentage": sum(s['portfolio_weight'] for s in stock_analysis),
+                    "overlapping_exposure_percentage": sum(s['portfolio_weight'] for s in stock_analysis
+                                                           if s['appears_in_etfs'] > 1)
                 },
-                "stock_overlap_analysis": ReportGenerator._get_stock_overlap_analysis(result['etfs'])
+                "pairwise_overlap": pairwise,
+                "stock_overlap_analysis": stock_analysis
             }
 
             if failed_isins:
@@ -860,11 +900,12 @@ def main():
                 }
 
             logger.info(f"Multi-ETF analysis complete: {len(etfs)} ETFs, {result['average_overlap']:.2f}% avg overlap")
-            print(json.dumps(output, indent=2))
-
-        else:
-            parser.print_help()
-            return 1
+            if fmt == 'json':
+                print(json.dumps(output, indent=2))
+            elif fmt == 'csv':
+                report_gen.write_multi_csv(output, sys.stdout)
+            else:
+                print(report_gen.generate_multi_table(output))
 
     finally:
         cache.close()

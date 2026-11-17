@@ -30,7 +30,11 @@ python etf_overlap.py --isin1 IE00B4L5Y983 --isin2 IE00B3RBWM25
 # Analyze multiple ETFs
 python etf_overlap.py --multi IE00B4L5Y983,IE00B3RBWM25,IE00BK5BQT80
 
-# Get JSON output for integration
+# Analyze a portfolio: each ETF's share in percent after a colon
+python etf_overlap.py --multi IE00B4L5Y983:70,IE00B3RBWM25:15,IE00BK5BQT80:10,IE00BKM4GZ66:5
+
+# Output is a table by default; CSV or JSON on request
+python etf_overlap.py --multi IE00B4L5Y983:70,IE00B3RBWM25:30 --csv > portfolio.csv
 python etf_overlap.py --multi IE00B4L5Y983,IE00B3RBWM25 --json
 
 # Expire cache and fetch fresh data
@@ -175,9 +179,12 @@ Analyze ETF overlap for multiple ETFs.
 **Request:**
 ```json
 {
-  "isins": ["IE00B4L5Y983", "IE00B3RBWM25"]
+  "isins": ["IE00B4L5Y983", "IE00B3RBWM25"],
+  "weights": [70, 30]
 }
 ```
+
+`weights` is optional: one portfolio share in percent per ISIN. Without it every ETF counts equally.
 
 **Response:**
 ```json

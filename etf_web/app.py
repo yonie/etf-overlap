@@ -19,6 +19,7 @@ DEPLOYMENT NOTES:
 
 import logging
 import logging.handlers
+import math
 import os
 import re
 import subprocess
@@ -245,6 +246,19 @@ def analyze():
         if len(validated_isins) < 2:
             return jsonify({'error': 'At least 2 valid ETF ISINs required'}), 400
 
+        # Optional portfolio shares, one positive percentage per ISIN
+        weights = data.get('weights')
+        if weights is not None:
+            if (not isinstance(weights, list) or len(weights) != len(validated_isins)
+                    or not all(isinstance(w, (int, float)) and not isinstance(w, bool)
+                               and math.isfinite(w) and 0 < w <= 1e6 for w in weights)):
+                return jsonify({
+                    'error': 'weights must be an array with one positive percentage per ISIN'
+                }), 400
+            portfolio = [f'{isin}:{float(w):g}' for isin, w in zip(validated_isins, weights)]
+        else:
+            portfolio = validated_isins
+
         logger.info(
             f"Processing analysis request from {request.remote_addr} for "
             f"{len(validated_isins)} ISINs"
@@ -258,7 +272,7 @@ def analyze():
             return jsonify({'error': 'Analysis script not found'}), 500
 
         result = subprocess.run(
-            ['python', str(script_path), '--multi', ','.join(validated_isins)],
+            ['python', str(script_path), '--multi', ','.join(portfolio), '--json'],
             capture_output=True,
             text=True,
             cwd=str(script_dir),
